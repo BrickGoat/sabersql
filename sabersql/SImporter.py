@@ -115,7 +115,7 @@ class SImporter:
             for row in dataframe.values:
                 yield make_row(row)
 
-        self._connection.import_data("pitch", dataframe.columns, make_data(dataframe), batch_size=400)
+        self._connection.import_data("pitch", dataframe.columns, make_data(dataframe), batch_size=500)
 
     def __year_files(self, year):
         """
