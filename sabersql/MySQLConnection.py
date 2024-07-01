@@ -2,6 +2,7 @@
 
 from .Utilities import _shell
 from . import Schemas
+import tempfile
 
 class MySQLConnection:
     """
@@ -33,23 +34,22 @@ class MySQLConnection:
         :return: the stdout of running the command
         :raises ConnectionError: if the connection fails
         """
+        with tempfile.NamedTemporaryFile(delete=False, mode='w') as temp_query_file:
+            temp_query_file.write(command)
+            temp_query_file.flush()
 
-        if use_database:
-            stdout, stderr = _shell("export MYSQL_PWD=%s; mysql -u%s %s -B -e \"%s\"" %
-                                    (self._password, self._username, self._database, command))
-        else:
-            stdout, stderr = _shell("export MYSQL_PWD=%s; mysql -u%s -B -e \"%s\"" %
-                                    (self._password, self._username, command))
+            if use_database:
+                mysql_command = f"export MYSQL_PWD={self._password}; mysql -u{self._username} {self._database} -B < {temp_query_file.name}"
+            else:
+                mysql_command = f"export MYSQL_PWD={self._password}; mysql -u{self._username} -B < {temp_query_file.name}"
+
+            stdout, stderr = _shell(mysql_command)
 
         if stderr:
-            if_port = ""
-            if self._port:
-                if_port = ":%s" % self._port
-            raise ConnectionError("Failed to connect to MySQL database %s at %s@%s%s : %s" %
-                                  (self._database, self._username, self._address, if_port, stderr))
+            if_port = f":{self._port}" if self._port else ""
+            raise ConnectionError(f"Failed to connect to MySQL database {self._database} at {self._username}@{self._address}{if_port} : {stderr}")
         else:
             return stdout
-
 
     def create_database(self):
         """
