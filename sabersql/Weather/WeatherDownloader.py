@@ -43,26 +43,6 @@ class WeatherDownloader:
         self._complete_operation(tracker, results, handler)
         return results['downloaded_files'] > 0
     
-    def _parse_filename_info(self, filename):
-        """
-        Extract stadium, team, and date information from a weather filename.
-        
-        Expected format: "TEAM__STADIUM__START-DATE__END-DATE.csv"
-        """
-        try:
-            parts = os.path.splitext(filename)[0].split('__')
-            if len(parts) != 4:
-                return None
-                
-            return {
-                'team': parts[0],
-                'stadium': parts[1],
-                'start_date': datetime.strptime(parts[2], '%Y-%m-%d'),
-                'end_date': datetime.strptime(parts[3], '%Y-%m-%d')
-            }
-        except Exception:
-            return None
-    
     def _prepare_download(self, weather_types=None):
         """Prepare for download by creating directory and setting defaults."""
         weather_dir = os.path.join(self._path, "Weather")

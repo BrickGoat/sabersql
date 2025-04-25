@@ -2,7 +2,7 @@
 
 import os
 import pandas as pd
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 def get_existing_date_coverage(weather_dir):
     """Scan existing CSV files to determine date coverage for each station."""
@@ -11,29 +11,27 @@ def get_existing_date_coverage(weather_dir):
     for csv_file in os.listdir(weather_dir):
         if not csv_file.endswith('.csv'):
             continue
-            
-        file_path = os.path.join(weather_dir, csv_file)
+        #TODO - add station name to filename?
+        file_info = parse_filename_info(csv_file)
+        if not file_info:
+            continue
         
-        # Read the file to determine the station and date range
+        file_path = os.path.join(weather_dir, csv_file)
         try:
-            df = pd.read_csv(file_path, comment='#')
-            if df.empty or 'station' not in df.columns or 'valid' not in df.columns:
+            df = pd.read_csv(file_path, comment='#', nrows=1)  
+            if df.empty or 'station' not in df.columns:
                 continue
                 
-            for station, group in df.groupby('station'):
-                if station not in coverage:
-                    coverage[station] = []
-                
-                dates = pd.to_datetime(group['valid'])
-                min_date = dates.min().to_pydatetime()
-                max_date = dates.max().to_pydatetime()
-                
-                coverage[station].append((min_date, max_date))
+            station = df['station'].iloc[0]
+            
+            if station not in coverage:
+                coverage[station] = []
+            coverage[station].append((file_info['start_date'], file_info['end_date']))
+            
         except Exception:
-            # Skip files that can't be read properly
             continue
     
-    # Merge overlapping date ranges for each station
+    # Merge overlapping date ranges
     for station in coverage:
         coverage[station] = merge_date_ranges(coverage[station])
     
@@ -116,3 +114,69 @@ def validate_downloaded_file(filepath, station_icao, stadium, tracker, start_dat
         
         print(f" Weather data downloaded for {stadium}")
         return True
+
+def parse_filename_info(filename):
+    """
+        Extract stadium, team, and date information from a weather filename.
+        
+        Expected format: "TEAM__STADIUM__START-DATE__END-DATE.csv"
+     """
+    try:
+        parts = os.path.splitext(filename)[0].split('__')
+        if len(parts) != 4:
+            return None
+            
+        return {
+            'team': parts[0],
+            'stadium': parts[1],
+            'start_date': datetime.strptime(parts[2], '%Y-%m-%d'),
+            'end_date': datetime.strptime(parts[3], '%Y-%m-%d')
+        }
+    except Exception:
+        return None
+    
+def clean_weather_dataframe(df):
+    """Clean and prepare a weather DataFrame for import."""
+    if df.empty:
+        return df
+    
+    df = df.copy()
+    
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].replace('M', pd.NA)
+    
+    numeric_cols = ['tmpf', 'dwpf', 'relh', 'drct', 'sknt', 'gust', 'alti', 'vsby', 'lat', 'lon']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    if 'valid' in df.columns:
+        df['valid'] = pd.to_datetime(df['valid'], errors='coerce')
+    
+    if 'station' in df.columns and 'valid' in df.columns:
+        df['non_null_count'] = df.notna().sum(axis=1)
+        df = (
+            df.sort_values('non_null_count', ascending=False)
+            .drop_duplicates(subset=['station', 'valid'], keep='first')
+        )
+        df = df.drop(columns=['non_null_count'])
+    
+    return df
+
+def read_weather_csv(filepath):
+    """Read a weather CSV file and clean the data."""
+    try:
+        df = pd.read_csv(filepath, comment='#')
+        
+        if df.empty:
+            return True, df, "File contains no data rows"
+        
+        df = clean_weather_dataframe(df)
+        
+        if 'valid' not in df.columns or 'station' not in df.columns:
+            return False, None, "Missing required columns (station or valid)"
+        
+        return True, df, None
+    except Exception as e:
+        return False, None, str(e)
