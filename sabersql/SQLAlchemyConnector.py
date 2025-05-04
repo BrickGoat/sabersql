@@ -24,7 +24,6 @@ class SQLAlchemyConnector:
         self._database = database
         self._address = address
         
-        # Create SQLAlchemy engine
         self._engine = self._create_engine()
         
     def _create_engine(self):
@@ -38,7 +37,7 @@ class SQLAlchemyConnector:
             conn_string = f"mysql+pymysql://{self._username}:{self._password}@{self._address}/{self._database}"
             return create_engine(conn_string)
         except Exception as e:
-            raise ConnectionError(f"Failed to create SQLAlchemy engine for {self._database} at {self._username}@{self._address}:{self._port} : {str(e)}")
+            raise ConnectionError(f"Failed to create SQLAlchemy engine for {self._database} at {self._username}@{self._address} : {str(e)}")
             
     def read_sql(self, query, params=None):
         """
@@ -87,8 +86,19 @@ class SQLAlchemyConnector:
             
     def batch_update(self, table, update_data, id_column='pitch_id'):
         """
-        Perform a batch update operation
-        
+        Generates a single UPDATE statement like:
+        UPDATE pitch SET
+            velocity = CASE pitch_id
+                WHEN 1 THEN 92.3
+                WHEN 2 THEN 94.1
+                WHEN 3 THEN 93.0
+                ELSE velocity END,
+            spin_rate = CASE pitch_id
+                WHEN 1 THEN 2200
+                WHEN 2 THEN 2250
+                ELSE spin_rate END
+        WHERE pitch_id IN (1, 2, 3)
+
         :param table: Table name to update
         :param update_data: List of dictionaries with column data to update
         :param id_column: Name of the ID column to use in the WHERE clause
@@ -123,7 +133,6 @@ class SQLAlchemyConnector:
             # Build the final query
             query = f"UPDATE {table} SET {', '.join(case_statements)} WHERE {id_column} IN ({id_list})"
             
-            # Execute the query
             with self._engine.connect() as connection:
                 connection.execute(text(query))
                 connection.commit()
