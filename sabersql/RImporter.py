@@ -3,7 +3,8 @@
 from datetime import datetime
 import os
 from . import Utilities
-import math
+import pandas as pd
+from sqlalchemy import text
 import re
 import pandas
 from .ProgressHandler import ProgressHandler
@@ -190,9 +191,6 @@ class RImporter:
         :param fields: additional fields that are constant for the entire dataframe
         :raises ConnectionError: if the connection fails
         """
-
-        keys = fields.keys()
-
         cols = []
         for col in dataframe.columns:
             if table == "game" and col == "AWAY_BI_CT":
@@ -201,57 +199,53 @@ class RImporter:
                 cols.append("HOME_RBI_CT")
             else:
                 cols.append(col)
-        for col in keys:
+        
+        for col in fields.keys():
             cols.append(col)
+        
+        records = []
+        
+        for row in dataframe.values:
+            record = {}
+            for i, cell in enumerate(row):
+                col_name = cols[i]
+                
+                if pd.isna(cell):
+                    record[col_name] = None
+                elif isinstance(cell, str) and (cell == "null" or cell == "" or cell == "(unknown)"):
+                    record[col_name] = None
+                elif table == "game" and (cols[i] == "INPUT_RECORD_TS" or cols[i] == "EDIT_RECORD_TS") and isinstance(cell, str):
+                    try:
+                        arr = cell.split(" ")
+                        pre = arr[0].split("/")
+                        arr2 = arr[1].split(":")
+                        post = arr2[1]
+                        hours = int(arr2[0])
+                        ampm = post[-2:]
+                        minutes = int(post[:-2])
 
-        def make_cell(cell, key):
-            t = type(cell)
-            if t is int or t is float:
-                if math.isnan(cell):
-                    return "NULL"
+                        if hours == 12:
+                            hours -= 12
+                        if ampm == "PM":
+                            hours += 12
+
+                        dt = datetime(year=int(pre[0]), month=int(pre[1]), day=int(pre[2]), 
+                                    hour=hours, minute=minutes)
+                        record[col_name] = dt
+                    except:
+                        record[col_name] = None
                 else:
-                    return str(cell)
-            elif t is str:
-                if cell == "null" or cell == "" or cell == "(unknown)":
-                    return "NULL"
-                else:
-                    if table == "game" and (key == "INPUT_RECORD_TS" or key == "EDIT_RECORD_TS"):
-                        try:
-                            arr = cell.split(" ")
-                            pre = arr[0].split("/")
-                            arr2 = arr[1].split(":")
-                            post = arr2[1]
-                            hours = int(arr2[0])
-                            ampm = post[-2:]
-                            minutes = int(post[:-2])
-
-                            if hours == 12:
-                                hours -= 12
-                            if ampm == "PM":
-                                hours += 12
-
-                            dt = datetime(year=int(pre[0]), month=int(pre[1]), day=int(pre[2]), hour=hours, minute=minutes)
-                            return dt.strftime("\'%Y/%m/%d %-H:%M:00\'")
-                        except:
-                            return "NULL"
-                    else:
-                        return "\'" + cell.replace("\'", "\\\'") + "\'"
-            else:
-                raise TypeError("Unrecognized cell type: %s" % str(t))
-
-        def make_row(row):
-            i = 0
-            for cell in row:
-                yield make_cell(cell, cols[i])
-                i += 1
-            for key in keys:
-                yield make_cell(fields[key], key)
-
-        def make_data(dataframe):
-            for row in dataframe.values:
-                yield make_row(row)
-
-        self._connection.import_data(table, cols, make_data(dataframe), batch_size=100)
+                    record[col_name] = cell
+                    
+            for key, value in fields.items():
+                record[key] = value
+                
+            records.append(record)
+        
+        if records:
+            df = pd.DataFrame(records)
+            df.to_sql(table, self._connection._engine, if_exists='append', 
+                    index=False, chunksize=100, method='multi')
 
     def __undo_sql_import(self, year):
         """
@@ -260,9 +254,10 @@ class RImporter:
         :param year: the year to undo progress on
         :raises ConnectionError: if the connection fails
         """
+        self._connection.execute(f"DELETE FROM event WHERE GAME_ID REGEXP '.{{3}}{year}.{{5}}';")
+        self._connection.execute(f"DELETE FROM game WHERE year(GAME_DT) = {year};")
+        self._connection.execute(f"DELETE FROM sub WHERE GAME_ID REGEXP '.{{3}}{year}.{{5}}';")
 
-        self._connection._run("DELETE FROM event WHERE GAME_ID REGEXP '.{3}%s.{5}';" % year)
-        self._connection._run("DELETE FROM game WHERE year(GAME_DT) = %s;" % year)
-        self._connection._run("DELETE FROM sub WHERE GAME_ID REGEXP '.{3}%s.{5}';" % year)
-
-        os.remove(os.path.join(self._path, "Retrosheet", "processed", "%s" % year, "progress.dat"))
+        path = os.path.join(self._path, "Retrosheet", "processed", "%s" % year, "progress.dat")
+        if os.path.exists(path):
+            os.remove(path)
