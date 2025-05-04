@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
 import os
+import glob
 from . import Utilities
-import math
-import functools
+import pandas as pd
+from sqlalchemy import text
 from .ProgressHandler import ProgressHandler
 
 
@@ -68,14 +69,40 @@ class PImporter:
         handler(0, status=status)
         progress_handler = ProgressHandler(os.path.join(self._path, "Person"))
         progress = progress_handler.get_progress()
+        
         if progress != ProgressHandler.FINISHED:
             if progress == ProgressHandler.STARTED:
                 self.__undo_sql_import()
             progress_handler.start_progress()
 
-            self.__import_people_from_file(os.path.join(self._path, "Person", "people.csv"), handler)
-
+            # Get all people CSV files
+            person_dir = os.path.join(self._path, "Person")
+            csv_files = glob.glob(os.path.join(person_dir, "people-*.csv"))
+            
+            if not csv_files:
+                print("No people CSV files found to import.")
+                handler(1, status="No people data to import")
+                return
+            
+            total_files = len(csv_files)
+            files_processed = 0
+            
+            # Import each CSV file
+            for csv_file in csv_files:
+                try:
+                    print(f"Importing {os.path.basename(csv_file)}...")
+                    self.__import_people_from_file(csv_file, lambda progress: handler(
+                        (files_processed + progress) / total_files, 
+                        status=f"Importing people data ({files_processed+1}/{total_files})"
+                    ))
+                    files_processed += 1
+                    handler(files_processed / total_files, 
+                            status=f"Importing people data ({files_processed}/{total_files})")
+                except Exception as e:
+                    print(f"Error importing {csv_file}: {str(e)}")
+            
             progress_handler.end_progress()
+        
         handler(1, status=status)
 
     def unimport_people_data(self, handler=lambda *args: None):
@@ -95,57 +122,95 @@ class PImporter:
             self.__undo_sql_import()
         handler(1, status=status)
 
-    def __import_people_from_file(self, url, handler):
+    def __import_people_from_file(self, filepath, handler):
+        """
+        Import people data from a specific CSV file
+
+        :param filepath: Path to the CSV file
+        :param handler: Progress handler function
+        """
         batch_size = 1000
 
-        dataframe = Utilities._import_csv(url)
-
-        indices = []
-        for i in range(0, len(dataframe.columns)):
-            if functools.reduce(lambda acc, e : acc or e[0] == dataframe.columns[i], self.__key_pair, False):
-                indices.append(i)
-
-        length = len(dataframe)
-
-        def make_cell(cell):
-            t = type(cell)
-            if t is int or t is float:
-                if math.isnan(cell):
-                    return "NULL"
-                else:
-                    return str(cell)
-            elif t is str:
-                if cell == "null":
-                    return "NULL"
-                else:
-                    return "\'" + cell.replace("\'", "\\\'") + "\'"
-            else:
-                raise TypeError("Unrecognized cell type: %s" % str(t))
-
-        def make_row(row):
-            for i in indices:
-                yield make_cell(row[i])
-
-        def make_data(dataframe):
-            count = 0
+        try:
+            dataframe = Utilities._import_csv(filepath)
+            
+            # Skip if empty
+            length = len(dataframe)
+            if length == 0:
+                print(f"  {os.path.basename(filepath)} is empty, skipping.")
+                return
+                
+            # Get database column names from key_pair mapping
+            column_names = [x[1] for x in self.__key_pair]
+            
+            # Map column indices to use from the dataframe
+            indices = []
+            column_map = {}
+            for i, col_name in enumerate(dataframe.columns):
+                for csv_col, db_col in self.__key_pair:
+                    if csv_col == col_name:
+                        indices.append(i)
+                        column_map[i] = db_col
+                        break
+            
+            # Prepare the SQL insert statement
+            columns_str = ", ".join(column_names)
+            placeholders = ", ".join([":"+col for col in column_names])
+            insert_query = f"INSERT INTO person ({columns_str}) VALUES ({placeholders})"
+            
+            # Process in batches
+            rows_processed = 0
+            batch_data = []
+            
             for row in dataframe.values:
-                yield make_row(row)
-                count += 1
-                if count % batch_size == 0:
-                    handler(count/length)
-
-        self._connection.import_data("person", [x[1] for x in self.__key_pair], make_data(dataframe),
-                                     batch_size=batch_size)
+                # Create a dictionary for this row
+                row_dict = {}
+                for i, db_col in column_map.items():
+                    cell = row[i]
+                    # Convert to proper SQL format
+                    if pd.isna(cell):
+                        row_dict[db_col] = None
+                    elif isinstance(cell, str) and cell.lower() == "null":
+                        row_dict[db_col] = None
+                    else:
+                        row_dict[db_col] = cell
+                
+                # Make sure all expected columns are in the dictionary
+                for col in column_names:
+                    if col not in row_dict:
+                        row_dict[col] = None
+                
+                batch_data.append(row_dict)
+                rows_processed += 1
+                
+                # Execute batch when it reaches the batch size
+                if len(batch_data) >= batch_size:
+                    with self._connection._engine.connect() as conn:
+                        conn.execute(text(insert_query), batch_data)
+                        conn.commit()
+                    batch_data = []
+                    handler(rows_processed/length)
+            
+            # Insert any remaining records
+            if batch_data:
+                with self._connection._engine.connect() as conn:
+                    conn.execute(text(insert_query), batch_data)
+                    conn.commit()
+            
+            print(f"  Successfully imported {length} records from {os.path.basename(filepath)}")
+            
+        except Exception as e:
+            print(f"  Error processing {filepath}: {str(e)}")
+            raise
 
     def __undo_sql_import(self):
         """
         Undoes all import progress to the database so far on a year
 
-        :param year: the year to undo progress on
         :raises ConnectionError: if the connection fails
         """
-
-        self._connection._run("DELETE FROM person;")
+        self._connection.execute("DELETE FROM person;")
 
         progress_file_path = os.path.join(self._path, "Person", "progress.dat")
-        os.remove(progress_file_path)
+        if os.path.exists(progress_file_path):
+            os.remove(progress_file_path)
