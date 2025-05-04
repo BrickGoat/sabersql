@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import SQLAlchemyError
 import pandas as pd
+from .Schemas import schemas
 
 class SQLAlchemyConnector:
     """
@@ -25,7 +25,32 @@ class SQLAlchemyConnector:
         self._address = address
         
         self._engine = self._create_engine()
-        
+
+    def create_database(self):
+        """
+        Creates database and tables
+
+        :raises ConnectionError: if the connection fails
+        """
+        try:
+            temp_conn_string = f"mysql+pymysql://{self._username}:{self._password}@{self._address}"
+            temp_engine = create_engine(temp_conn_string)
+            
+            with temp_engine.connect() as conn:
+                conn.execute(text(f"CREATE DATABASE IF NOT EXISTS {self._database}"))
+                conn.commit()
+            
+            with self._engine.connect() as conn:
+                for schema in schemas:
+                    conn.execute(text(schema))
+                    conn.commit()
+                
+            print(f"Database {self._database} and required tables created successfully")
+            
+        except Exception as e:
+            if_port = f":{self._port}" if self._port else ""
+            raise ConnectionError(f"Failed to create database {self._database} at {self._username}@{self._address}{if_port} : {str(e)}")
+            
     def _create_engine(self):
         """
         Creates a SQLAlchemy engine

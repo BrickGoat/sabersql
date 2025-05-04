@@ -52,8 +52,7 @@ class BaseCommand(abc.ABC):
             parser.add_argument("--end-date", help="End date in YYYY-MM-DD format")
         parser.add_argument("--undo", action="store_true", help="Undo the operation")
         parser.add_argument("--debug", action="store_true", help="Show detailed error messages")
-
-    
+ 
     def _add_download_args(self, parser):
         """Add download arguments to a parser."""
         self._add_common_args(parser)
@@ -167,6 +166,7 @@ class BaseCommand(abc.ABC):
         :return: A MySQLConnection object
         """
         connection = SQLAlchemyConnector(args.user, args.password, args.schema, args.address)
+        connection.create_database()
         return connection
     
     @abc.abstractmethod
