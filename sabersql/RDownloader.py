@@ -4,20 +4,13 @@ import os
 from datetime import datetime
 from .Utilities import _download
 from .Utilities import _shell
+from .BaseDownloader import BaseDownloader
 
 
-class RDownloader:
+class RetrosheetDownloader(BaseDownloader):
     """
     Manages Retrosheet downloads.
     """
-
-    def __init__(self, path):
-        """
-        Initializes a RDownloader based on the path to the SaberSQL data
-
-        :param path: the path to the folder for all SaberSQL data
-        """
-        self._path = path
 
     def download(self, year=None, handler=lambda *args: None):
         """
@@ -26,11 +19,7 @@ class RDownloader:
         :param year: the year to be downloaded; defaults to all years 1903 to present
         :param handler: a function that takes in a double, representing the completion percentage of the download
         """
-
-        if year:
-            years = [year]
-        else:
-            years = [y for y in range(1903, datetime.now().year + 1)]
+        years = self._get_years_range(year, start_year=1903)
         paths = self.__download_paths(years)
 
         handler(0, status="Downloading Retrosheet data")
@@ -45,14 +34,10 @@ class RDownloader:
         :param year: the year to be undownloaded; defaults to all years 1903 to present
         :param handler: a function that takes in a double, representing the completion percentage of the download undoing
         """
-
-        if year:
-            years = [year]
-        else:
-            years = [y for y in range(1903, datetime.now().year + 1)]
+        years = self._get_years_range(year, start_year=1903)
         paths = self.__download_paths(years)
 
-        handler(0, status="Undoing Retrosheet dadownload")
+        handler(0, status="Undoing Retrosheet download")
         for i in range(0, len(paths)):
             _shell("rm -rf \"%s\"" % paths[i][2])
             handler((i + 1) / len(paths), status="Undoing Retrosheet download for %s" % paths[i][3])
