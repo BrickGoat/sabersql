@@ -18,6 +18,6 @@ class PeopleCommand(BaseCommand):
         """Create a people data importer."""
         return PImporter(args.path, connection)
     
-    def supports_year(self):
-        """People data doesn't support year filtering."""
+    def supports_date_range(self):
+        """People data doesn't support date range filtering."""
         return False

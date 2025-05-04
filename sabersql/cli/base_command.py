@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
 import abc
-from ..MySQLConnection import MySQLConnection
+from ..SQLAlchemyConnector import SQLAlchemyConnector
 from .utils import progress
 import traceback
+from datetime import datetime
+
 class BaseCommand(abc.ABC):
     """
     Base class for all command handlers.
@@ -25,42 +27,56 @@ class BaseCommand(abc.ABC):
         """
         subparsers = parser.add_subparsers(dest="subcommand", help="Operation to perform")
         
-        # Add download command
         download_parser = subparsers.add_parser('download', help=f'Download {self.name} data')
         self._add_download_args(download_parser)
         
-        # Add import command
         import_parser = subparsers.add_parser('import', help=f'Import {self.name} data to database')
         self._add_import_args(import_parser)
         
-        # Add process command (download + import)
         process_parser = subparsers.add_parser('process', help=f'Download and import {self.name} data', conflict_handler='resolve')
-        self._add_download_args(process_parser)
-        self._add_import_args(process_parser)
+        self._add_common_args(process_parser)
+        self._add_download_specific_args(process_parser)
+        self._add_import_specific_args(process_parser)
         
         return subparsers
     
-    def _add_download_args(self, parser):
+    def _add_common_args(self, parser):
         """
-        Add download arguments to a parser.
+        Add arguments common to all operations.
         
         :param parser: The argparse parser to add arguments to
         """
         parser.add_argument("path", nargs="?", help="The folder to store files downloaded and processed by sabersql")
-        if self.supports_year():
-            parser.add_argument("-y", "--year", type=int, help="Process only the given year")
-        parser.add_argument("--undo", action="store_true", help="Undo the download")
+        if self.supports_date_range():
+            parser.add_argument("--start-date", help="Start date in YYYY-MM-DD format")
+            parser.add_argument("--end-date", help="End date in YYYY-MM-DD format")
+        parser.add_argument("--undo", action="store_true", help="Undo the operation")
+        parser.add_argument("--debug", action="store_true", help="Show detailed error messages")
+
+    
+    def _add_download_args(self, parser):
+        """Add download arguments to a parser."""
+        self._add_common_args(parser)
+        self._add_download_specific_args(parser)
     
     def _add_import_args(self, parser):
+        """Add import arguments to a parser."""
+        self._add_common_args(parser)
+        self._add_import_specific_args(parser)
+    
+    def _add_download_specific_args(self, parser):
         """
-        Add import arguments to a parser.
-        
-        :param parser: The argparse parser to add arguments to
+        Add arguments specific to download operations.
+        Override in subclasses if needed.
         """
-        parser.add_argument("path", nargs="?", help="The folder to store files downloaded and processed by sabersql")
-        if self.supports_year():
-            parser.add_argument("-y", "--year", type=int, help="Process only the given year")
-        parser.add_argument("--undo", action="store_true", help="Undo the import")
+        pass
+    
+    def _add_import_specific_args(self, parser):
+        """
+        Add arguments specific to import operations.
+        Override in subclasses if needed.
+        """
+        pass
     
     def execute_command(self, args):
         """
@@ -91,7 +107,9 @@ class BaseCommand(abc.ABC):
         :return: True if successful, False otherwise
         """
         try:
-            # Download data if requested
+            if self.supports_date_range():
+                self._handle_date_range_args(args)
+                
             if not import_only:
                 downloader = self.create_downloader(args)
                 
@@ -102,7 +120,6 @@ class BaseCommand(abc.ABC):
                     print(f"Downloading {self.name} data...")
                     self.handle_download(downloader, args)
             
-            # Import data if requested
             if not download_only:
                 connection = self.create_connection(args)
                 importer = self.create_importer(args, connection)
@@ -116,8 +133,31 @@ class BaseCommand(abc.ABC):
             
             return True
         except Exception as e:
-            print(f"Error processing {self.name} data: {str(e)}\n{traceback.format_exc()}")
+            print(f"Error processing {self.name} data: {str(e)}")
+            if hasattr(args, 'debug') and args.debug:
+                print(traceback.format_exc())
             return False
+    
+    def _handle_date_range_args(self, args):
+        """
+        Process date range arguments, setting defaults if needed.
+        
+        :param args: The parsed command-line arguments
+        """
+        if not hasattr(args, 'start_date') or not args.start_date:
+            current_year = datetime.now().year
+            args.start_date = f"{current_year}-01-01"
+            print(f"Using default start date: {args.start_date}")
+        
+        if not hasattr(args, 'end_date') or not args.end_date:
+            try:
+                start_date = datetime.strptime(args.start_date, '%Y-%m-%d')
+                end_date = datetime(start_date.year, 12, 31)
+                args.end_date = end_date.strftime('%Y-%m-%d')
+                print(f"Using default end date: {args.end_date}")
+            except ValueError:
+                args.end_date = datetime.now().strftime('%Y-%m-%d')
+                print(f"Invalid start date format. Using today as end date: {args.end_date}")
     
     def create_connection(self, args):
         """
@@ -126,8 +166,7 @@ class BaseCommand(abc.ABC):
         :param args: The parsed command-line arguments
         :return: A MySQLConnection object
         """
-        connection = MySQLConnection(args.user, args.password, args.schema, args.address)
-        connection.create_database()
+        connection = SQLAlchemyConnector(args.user, args.password, args.schema, args.address)
         return connection
     
     @abc.abstractmethod
@@ -161,8 +200,10 @@ class BaseCommand(abc.ABC):
         :param downloader: The downloader object
         :param args: The parsed command-line arguments
         """
-        if self.supports_year():
-            downloader.download(handler=progress, year=args.year)
+        if self.supports_date_range():
+            start_date = args.start_date
+            end_date = args.end_date
+            downloader.download(handler=progress, start_date=start_date, end_date=end_date)
         else:
             downloader.download(handler=progress)
     
@@ -176,8 +217,10 @@ class BaseCommand(abc.ABC):
         :param downloader: The downloader object
         :param args: The parsed command-line arguments
         """
-        if self.supports_year():
-            downloader.undownload(handler=progress, year=args.year)
+        if self.supports_date_range():
+            start_date = args.start_date
+            end_date = args.end_date
+            downloader.undownload(handler=progress, start_date=start_date, end_date=end_date)
         else:
             downloader.undownload(handler=progress)
     
@@ -191,11 +234,10 @@ class BaseCommand(abc.ABC):
         :param importer: The importer object
         :param args: The parsed command-line arguments
         """
-        if self.supports_year():
-            method = getattr(importer, self.get_import_method_name())
-            method(handler=progress, year=args.year)
+        method = getattr(importer, self.get_import_method_name())
+        if self.supports_date_range():
+            method(handler=progress, start_date=args.start_date, end_date=args.end_date)
         else:
-            method = getattr(importer, self.get_import_method_name())
             method(handler=progress)
     
     def handle_unimport(self, importer, args):
@@ -208,18 +250,17 @@ class BaseCommand(abc.ABC):
         :param importer: The importer object
         :param args: The parsed command-line arguments
         """
-        if self.supports_year():
-            method = getattr(importer, self.get_unimport_method_name())
-            method(handler=progress, year=args.year)
+        method = getattr(importer, self.get_unimport_method_name())
+        if self.supports_date_range():
+            method(handler=progress, start_date=args.start_date, end_date=args.end_date)
         else:
-            method = getattr(importer, self.get_unimport_method_name())
             method(handler=progress)
     
-    def supports_year(self):
+    def supports_date_range(self):
         """
-        Whether this data source supports year-specific operations.
+        Whether this data source supports date range filtering.
         
-        :return: True if this data source supports year filtering, False otherwise
+        :return: True if this data source supports date range filtering, False otherwise
         """
         return True
     
@@ -238,3 +279,19 @@ class BaseCommand(abc.ABC):
         :return: The name of the method to call on the importer
         """
         return f"unimport_{self.name}_data"
+        
+    def _create_progress_handler(self, prefix=''):
+        """
+        Create a progress handler that can be used by operations.
+        
+        :param prefix: Text to prepend to status messages
+        :return: A progress handler function
+        """
+        def handler(fraction, status=''):
+            if prefix and status:
+                status = f"{prefix}: {status}"
+            elif prefix:
+                status = prefix
+            progress(fraction, status)
+        
+        return handler

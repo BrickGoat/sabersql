@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 
-from .base_command import BaseCommand
-from ..SDownloader import SDownloader
+from .year_based_command import YearBasedCommand
+from ..SDownloader import StatcastDownloader
 from ..SImporter import SImporter
 
-class StatcastCommand(BaseCommand):
+class StatcastCommand(YearBasedCommand):
     """Command handler for BaseballSavant (Statcast) data."""
     
     def __init__(self):
@@ -12,7 +12,7 @@ class StatcastCommand(BaseCommand):
     
     def create_downloader(self, args):
         """Create a Statcast downloader."""
-        return SDownloader(args.path)
+        return StatcastDownloader(args.path)
     
     def create_importer(self, args, connection):
         """Create a Statcast importer."""

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 
-from .base_command import BaseCommand
-from ..RDownloader import RDownloader
+from .year_based_command import YearBasedCommand
+from ..RDownloader import RetrosheetDownloader
 from ..RImporter import RImporter
 
-class RetrosheetCommand(BaseCommand):
+class RetrosheetCommand(YearBasedCommand):
     """Command handler for Retrosheet data."""
     
     def __init__(self):
@@ -12,7 +12,7 @@ class RetrosheetCommand(BaseCommand):
     
     def create_downloader(self, args):
         """Create a Retrosheet downloader."""
-        return RDownloader(args.path)
+        return RetrosheetDownloader(args.path)
     
     def create_importer(self, args, connection):
         """Create a Retrosheet importer."""
