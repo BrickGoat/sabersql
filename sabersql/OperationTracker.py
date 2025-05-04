@@ -36,7 +36,6 @@ class OperationTracker:
             with open(self.tracker_file, 'r') as f:
                 return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
-            # Return empty dict if file doesn't exist or is invalid
             return {}
     
     def _save_data(self, data):
@@ -82,16 +81,13 @@ class OperationTracker:
         """
         data = self._load_data()
         
-        # Get existing operation data or create new
         op_data = data.get(operation_name, {})
         
-        # Update operation data
         op_data.update({
             'status': 'success' if success else 'failed',
             'end_time': datetime.now().isoformat()
         })
         
-        # Add error information if provided
         if error is not None:
             error_info = {
                 'error_type': error.__class__.__name__ if hasattr(error, '__class__') else 'Unknown',
@@ -100,12 +96,10 @@ class OperationTracker:
             }
             op_data['error'] = error_info
         
-        # Update or add metadata
         op_metadata = op_data.get('metadata', {})
         op_metadata.update(metadata)
         op_data['metadata'] = op_metadata
         
-        # Save updated operation
         data[operation_name] = op_data
         self._save_data(data)
     
@@ -119,10 +113,8 @@ class OperationTracker:
         """
         data = self._load_data()
         
-        # Get existing operation data or create new
         op_data = data.get(operation_name, {})
         
-        # Add error information
         error_info = {
             'error_type': error.__class__.__name__ if hasattr(error, '__class__') else 'Unknown',
             'error_message': str(error),
@@ -130,17 +122,14 @@ class OperationTracker:
             'traceback': traceback.format_exc()
         }
         
-        # Add to list of errors
         if 'errors' not in op_data:
             op_data['errors'] = []
         op_data['errors'].append(error_info)
         
-        # Update or add metadata
         op_metadata = op_data.get('metadata', {})
         op_metadata.update(metadata)
         op_data['metadata'] = op_metadata
         
-        # Save updated operation
         data[operation_name] = op_data
         self._save_data(data)
     
@@ -165,12 +154,3 @@ class OperationTracker:
         """
         status = self.get_operation_status(operation_name)
         return status is not None and status.get('status') == 'success'
-    
-    def force_operation(self, force=False):
-        """
-        Determine if operations should run regardless of previous status.
-        
-        :param force: If True, ignore previous operation status
-        :return: True if operations should be forced to run
-        """
-        return force
