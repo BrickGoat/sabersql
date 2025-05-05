@@ -18,33 +18,91 @@ pip3 install sabersql
 ```
 
 ## Usage
-To download and import all data to your database, simply use the command:
+SaberSQL provides commands for managing different baseball data sources. Each command supports date-based filtering and various operations.
+
+### Basic Structure
 ```bash
-sabersql [path] -u [username] -p [password] -a [address] -s [schema]
+sabersql [options] {command} [command-options] [path]
 ```
-where:
-- path is the directory on your computer where downloaded data should be stored (as of May 2019, all of the data is
-about 18GB total)
-- username is the user of the MySQL database
-- password is the user's password to the MySQL database
-- address is the network address of the MySQL database
-- schema is the name of the schema to be used (the schema should already exist, without any tables in it)
 
-##### Optional Arguments
-- `--download` - only download the data from the web without importing it (the MySQL database information can
-then be omitted)
+Global options:
+- `--config CONFIG` - Path to a configuration file
+- `-u USER`, `--user USER` - MySQL username
+- `-p PASSWORD`, `--password PASSWORD` - MySQL password
+- `-a ADDRESS`, `--address ADDRESS` - MySQL server address
+- `-s SCHEMA`, `--schema SCHEMA` - MySQL schema name
 
-- `--import` - only import the data (assumes data has already been downloaded)
+Available commands:
+- `retrosheet` - Manage Retrosheet data
+- `statcast` - Manage BaseballSavant Statcast data
+- `people` - Manage player, manager, and umpire data
+- `weather` - Manage weather data
+- `enrich` - Enrich pitch data with additional information
 
-- `-y [year]` - only download and/or import a specific year's data
+### Command Operations
+Most commands support these subcommands:
+- `download` - Download data only
+- `import` - Import previously downloaded data
+- `process` - Download and import data (combined operation)
 
-- `--retrosheet` - only download and/or import Retrosheet data
+Most commands also support:
+- `--start-date DATE` - Process data from this date (YYYY-MM-DD format)
+- `--end-date DATE` - Process data up to this date (YYYY-MM-DD format)
+- `--undo` - Undo the operation
 
-- `--statcast` - only download and/or import BaseballSavant data
+### Examples
 
-- `--people` - only download and/or import player, umpire, and manager data
+#### Download Retrosheet data for a date range:
+```bash
+sabersql retrosheet download [path] --start-date 2023-01-01 --end-date 2023-12-31
+```
 
-- `--undo` - undoes the command instead
+#### Import Statcast data that's already been downloaded:
+```bash
+sabersql statcast import [path] --start-date 2022-04-01 --end-date 2022-10-31
+```
+
+#### Download and import people data:
+```bash
+sabersql people process [path]
+```
+
+#### Manage weather data:
+```bash
+sabersql weather download [path] --start-date 2023-04-01 --end-date 2023-10-31 --stadiums stadiums.csv --stations stations.csv
+```
+
+#### Enrich pitch data:
+The `enrich` command has a simplified structure without subcommands:
+```bash
+sabersql enrich [path] --timestamps --venues
+```
+
+Options for enrichment:
+- `--timestamps` - Add pitch timestamps
+- `--venues` - Add venue information
+- `--batch-size SIZE` - Number of records to process in each batch
+- `--start-date DATE` - Only enrich pitches from this date
+- `--end-date DATE` - Only enrich pitches up to this date
+
+If neither `--timestamps` nor `--venues` is specified, both will be processed.
+
+### Using a Configuration File
+You can create a configuration file to set default values:
+
+```ini
+[DEFAULT]
+path=/path/to/data
+user=root
+password=yourpassword
+address=localhost
+schema=baseball
+```
+
+Then use it with:
+```bash
+sabersql --config config.ini retrosheet download --start-date 2023-01-01 --end-date 2023-12-31
+```
 
 #### Notes
 - Data will not be re-downloaded or re-imported if a command is run multiple times. Additionally, a process will resume
@@ -52,14 +110,14 @@ from where it left off if restarted.
 - These processes are not fast. It will take many hours to download and import all data.
 
 ## Schema
-The structure of the database is five tables: [person](#person), [pitch](#pitch), [event](#event), [game](#game), and
-[sub](#sub).
+The structure of the database is five tables: [person](#person), [pitch](#pitch), [event](#event), [game](#game),
+[sub](#sub), [weather](#weather), and [venue](#venue).
 
 #### <a name="person"></a>person
 Each entry in this table represents someone who was a player, umpire, and/or manager.
 #### <a name="pitch"></a>pitch
 Each entry in this table represents a pitch recorded by BaseballSavant. Descriptions of each field can be found
-[here](https://baseballsavant.mlb.com/csv-docs).
+[here](https://baseballsavant.mlb.com/csv-docs). Timestamps and venue data from [statsapi](https://pypi.org/project/MLB-StatsAPI/) can also be added.
 #### <a name="event"></a>event
 Each entry in this table represents an event that Chadwick processed from Retrosheet data. Descriptions of each field
 can be found [here](http://chadwick.sourceforge.net/doc/cwevent.html).
@@ -69,6 +127,10 @@ can be found [here](http://chadwick.sourceforge.net/doc/cwgame.html).
 #### <a name="sub"></a>sub
 Each entry in this table represents a substitution in a game that Chadwick processed from Retrosheet data. Descriptions
 of each field can be found [here](http://chadwick.sourceforge.net/doc/cwsub.html).
+#### <a name="weather"></a>weather
+Each entry in this table a weather station measurement from the [Iowa Enviroment Mesonet](https://mesonet.agron.iastate.edu/request/download.phtml). Each weather station is the closest station to each venue.
+#### <a name="venue"></a>venue
+Each entry in this table contains mlb stadium info.
 
 ## License
 Copyright 2019 William Stevenson
