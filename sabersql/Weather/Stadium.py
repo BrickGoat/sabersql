@@ -1,23 +1,63 @@
+#!/usr/bin/env python3
+
 import pandas as pd
 import numpy as np
+import sqlalchemy
 
-def match_stadiums_to_weather_stations(stations_csv_path, stadiums_csv_path, 
-                                       start_date=None, end_date=None, 
-                                       max_distance_km=None):
+def get_venues_from_database(connection):
     """
-    Match each MLB stadium to the closest weather station that was active during
+    Retrieve venue information from the database 'venue' table.
+    
+    :param connection: A database connection or SQLAlchemy engine
+    :return: DataFrame with venue information (venue_id, name, lat, lon)
+    """
+    try:            
+        query = """
+        SELECT 
+            venue_id,
+            name,
+            location_latitude AS lat,
+            location_longitude AS lon,
+            location_city AS city,
+            location_state AS state
+        FROM venue
+        WHERE location_latitude IS NOT NULL AND location_longitude IS NOT NULL
+        """
+        
+        venues_df = pd.read_sql(query, connection)
+        
+        required_columns = ['venue_id', 'name', 'lat', 'lon']
+        for col in required_columns:
+            if col not in venues_df.columns:
+                raise ValueError(f"Required column '{col}' not found in venue data")
+        
+        print(f"Retrieved {len(venues_df)} venues from database")
+        return venues_df
+        
+    except Exception as e:
+        print(f"Error getting venues from database: {str(e)}")
+        raise
+
+def match_venues_to_weather_stations(stations_csv_path, connection, 
+                                    start_date=None, end_date=None, 
+                                    max_distance_km=None):
+    """
+    Match each MLB venue to the closest weather station that was active during
     the specified date range and within the maximum acceptable distance.
     
     :param stations_csv_path: Path to ISD history CSV file containing weather stations
-    :param stadiums_csv_path: Path to CSV file containing stadium information
+    :param connection: A database connection to retrieve venue information
+    :param venues_df: DataFrame with venue information (venue_id, name, lat, lon)
+                      If not provided, will use the venue table from the database
     :param start_date: Start date in 'YYYY-MM-DD' format to filter stations (inclusive)
     :param end_date: End date in 'YYYY-MM-DD' format to filter stations (inclusive)
-    :param max_distance_km: Maximum acceptable distance between stadium and station in kilometers
-    :return: DataFrame with stadium-to-station matches and distances. 
-             If no station meets the criteria for a stadium, the station_icao, 
-             station_usaf, and distance_km fields will be None for that stadium.
+    :param max_distance_km: Maximum acceptable distance between venue and station in kilometers
+    :return: DataFrame with venue-to-station matches and distances.
     """
-    stadia = pd.read_csv(stadiums_csv_path)  # team, stadium, lat, lon
+    venues = get_venues_from_database(connection)
+    
+    if venues.empty:
+        raise ValueError("No venue data found")
     
     stations = pd.read_csv(stations_csv_path)
     stations = stations.dropna(subset=['ICAO'])
@@ -41,52 +81,65 @@ def match_stadiums_to_weather_stations(stations_csv_path, stadiums_csv_path,
     elif end_date:
         print("Warning: 'end' column not found in stations data, skipping end date filtering")
     
-    # Check if we have any stations left after filtering
     if len(stations) == 0:
         print("Warning: No stations meet the date criteria")
         return pd.DataFrame([{
-            'team': park.team,
-            'stadium': park.stadium,
+            'venue_id': venue['venue_id'],
+            'venue_name': venue['name'],
             'station_icao': None,
             'station_usaf': None,
             'distance_km': None
-        } for _, park in stadia.iterrows()])
+        } for _, venue in venues.iterrows()])
     
-    # Match each stadium to the closest weather station within max_distance_km
     matches = []
-    for _, park in stadia.iterrows():
-        dists = haversine(
-            park.lat, park.lon,
-            stations.LAT.values, stations.LON.values
-        )
-        
-        if max_distance_km:
-            valid_indices = np.where(dists <= max_distance_km)[0]
-            if len(valid_indices) == 0:
-                # No stations within acceptable distance
-                matches.append({
-                    'team': park.team,
-                    'stadium': park.stadium,
-                    'station_icao': None,
-                    'station_usaf': None,
-                    'distance_km': None
-                })
-                continue
+    for _, venue in venues.iterrows():
+        try:
+            dists = haversine(
+                venue.lat, venue.lon,
+                stations.LAT.values, stations.LON.values
+            )
             
-            # Find the closest station among valid ones
-            idx = valid_indices[np.argmin(dists[valid_indices])]
-        else:
-            # No distance constraint, just find the closest
-            idx = np.argmin(dists)
-        
-        closest = stations.iloc[idx]
-        matches.append({
-            'team': park.team,
-            'stadium': park.stadium,
-            'station_icao': closest.ICAO[1:] if closest.ICAO[0] == 'K' else closest.ICAO,
-            'station_usaf': closest.USAF,
-            'distance_km': dists[idx]
-        })
+            if max_distance_km:
+                valid_indices = np.where(dists <= max_distance_km)[0]
+                if len(valid_indices) == 0:
+                    matches.append({
+                        'venue_id': venue.venue_id,
+                        'venue_name': venue.name,
+                        'station_icao': None,
+                        'station_usaf': None,
+                        'distance_km': None
+                    })
+                    continue
+                
+                # Find the closest station among valid ones
+                idx = valid_indices[np.argmin(dists[valid_indices])]
+            else:
+                idx = np.argmin(dists)
+            
+            closest = stations.iloc[idx]
+            
+            # Process ICAO code - some US stations start with K, which needs to be removed
+            icao_code = closest.ICAO
+            if isinstance(icao_code, str) and icao_code.startswith('K'):
+                icao_code = icao_code[1:]
+            
+            matches.append({
+                'venue_id': venue['venue_id'],
+                'venue_name': venue['name'],
+                'station_icao': icao_code,
+                'station_usaf': closest.USAF,
+                'distance_km': dists[idx],
+                'station_name': closest.get('STATION NAME', '')
+            })
+        except Exception as e:
+            print(f"Error matching venue {venue.name}: {str(e)}")
+            matches.append({
+                'venue_id': venue.venue_id,
+                'venue_name': venue.name,
+                'station_icao': None,
+                'station_usaf': None,
+                'distance_km': None
+            })
     
     return pd.DataFrame(matches)
 

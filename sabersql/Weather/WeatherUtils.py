@@ -11,7 +11,7 @@ def get_existing_date_coverage(weather_dir):
     for csv_file in os.listdir(weather_dir):
         if not csv_file.endswith('.csv'):
             continue
-        #TODO - add station name to filename?
+        
         file_info = parse_filename_info(csv_file)
         if not file_info:
             continue
@@ -97,40 +97,45 @@ def build_download_url(station_icao, start_date, end_date, weather_types):
             f"&tz=Etc/UTC&format=comma&latlon=yes"
     )
 
-def validate_downloaded_file(filepath, station_icao, stadium, tracker, start_date, end_date):
-        """Validate that the downloaded file contains data."""
-        with open(filepath, 'r') as f:
-            content = f.read()
-        
-        if '#' in content and not any(line.strip() and not line.strip().startswith('#') for line in content.split('\n')):
-            print(f"  No data retrieved for {stadium} in this date range")
-            os.remove(filepath)
-            tracker.record_error('download',
-                            ValueError(f"No data available for station {station_icao} in this date range"),
-                            stadium=stadium,
-                            station=station_icao,
-                            date_range=f"{start_date} to {end_date}")
-            return False
-        
-        print(f" Weather data downloaded for {stadium}")
-        return True
+def validate_downloaded_file(filepath, station_icao, venue_name, tracker, start_date, end_date):
+    """Validate that the downloaded file contains data."""
+    with open(filepath, 'r') as f:
+        content = f.read()
+    
+    if '#' in content and not any(line.strip() and not line.strip().startswith('#') for line in content.split('\n')):
+        print(f"  No data retrieved for {venue_name} in this date range")
+        os.remove(filepath)
+        tracker.record_error('download',
+                        ValueError(f"No data available for station {station_icao} in this date range"),
+                        venue=venue_name,
+                        station=station_icao,
+                        date_range=f"{start_date} to {end_date}")
+        return False
+    
+    print(f" Weather data downloaded for {venue_name}")
+    return True
 
 def parse_filename_info(filename):
     """
-        Extract stadium, team, and date information from a weather filename.
-        
-        Expected format: "TEAM__STADIUM__START-DATE__END-DATE.csv"
-     """
+    Extract venue ID and date information from a weather filename.
+    
+    Expected format: "VENUE-ID__START-DATE__END-DATE.csv"
+    """
     try:
         parts = os.path.splitext(filename)[0].split('__')
-        if len(parts) != 4:
+        if len(parts) != 3:
             return None
             
+        # Try to parse venue_id
+        try:
+            venue_id = int(parts[0])
+        except ValueError:
+            venue_id = None
+            
         return {
-            'team': parts[0],
-            'stadium': parts[1],
-            'start_date': datetime.strptime(parts[2], '%Y-%m-%d'),
-            'end_date': datetime.strptime(parts[3], '%Y-%m-%d')
+            'venue_id': venue_id,
+            'start_date': datetime.strptime(parts[1], '%Y-%m-%d'),
+            'end_date': datetime.strptime(parts[2], '%Y-%m-%d')
         }
     except Exception:
         return None
@@ -142,19 +147,24 @@ def clean_weather_dataframe(df):
     
     df = df.copy()
     
+    # Replace 'M' (missing) values with NaN
     for col in df.columns:
         if df[col].dtype == object:
             df[col] = df[col].replace('M', pd.NA)
     
+    # Convert numeric columns to proper type
     numeric_cols = ['tmpf', 'dwpf', 'relh', 'drct', 'sknt', 'gust', 'alti', 'vsby', 'lat', 'lon']
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
     
+    # Convert timestamp column
     if 'valid' in df.columns:
         df['valid'] = pd.to_datetime(df['valid'], errors='coerce')
     
+    # Remove duplicates based on station and timestamp
     if 'station' in df.columns and 'valid' in df.columns:
+        # Keep the row with the most data when duplicates exist
         df['non_null_count'] = df.notna().sum(axis=1)
         df = (
             df.sort_values('non_null_count', ascending=False)
@@ -180,3 +190,31 @@ def read_weather_csv(filepath):
         return True, df, None
     except Exception as e:
         return False, None, str(e)
+
+def generate_filename(venue_info, start_date, end_date):
+    """
+    Generate a consistent filename for weather data files.
+    
+    :param venue_info: Dictionary or Series with venue information
+    :param start_date: Start date (datetime or string)
+    :param end_date: End date (datetime or string)
+    :return: Filename string
+    """
+    # Convert dates to strings if needed
+    if isinstance(start_date, datetime):
+        start_date_str = start_date.strftime('%Y-%m-%d')
+    else:
+        start_date_str = start_date
+        
+    if isinstance(end_date, datetime):
+        end_date_str = end_date.strftime('%Y-%m-%d')
+    else:
+        end_date_str = end_date
+    
+    # Use venue_id for the filename
+    if 'venue_id' in venue_info and pd.notna(venue_info['venue_id']):
+        venue_id = str(venue_info['venue_id'])
+    else:
+        raise ValueError("Venue ID is required for filename generation")
+    
+    return f"{venue_id}__{start_date_str}__{end_date_str}.csv"
