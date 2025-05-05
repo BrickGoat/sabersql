@@ -2,15 +2,15 @@
 
 from datetime import datetime
 import os
-from . import Utilities
-import math
+import pandas as pd
 from .ProgressHandler import ProgressHandler
+from sqlalchemy import inspect
 
 class SImporter:
 
     def __init__(self, path, connection):
         """
-        Initializes a SDownloader based on the path to the SaberSQL data and a MySQLConnection
+        Initializes a SImporter based on the path to the SaberSQL data and a MySQLConnection
 
         :param path: the path to the folder for all SaberSQL data
         :param connection: a MySQLConnection to the database to import data to
@@ -18,6 +18,20 @@ class SImporter:
 
         self._path = path
         self._connection = connection
+        self._pitch_columns = self._get_pitch_table_columns()
+
+    def _get_pitch_table_columns(self):
+        """
+        Get valid column names from the pitch table schema
+        
+        :return: Set of valid column names
+        """
+        try:
+            inspector = inspect(self._connection._engine)
+            return set(col['name'] for col in inspector.get_columns('pitch'))
+        except Exception as e:
+            print(f"Warning: Couldn't retrieve pitch table schema: {str(e)}")
+            return set()
 
     def import_statcast_data(self, year=None, handler=lambda *args: None):
         """
@@ -37,6 +51,13 @@ class SImporter:
         handler(0, status="Importing Statcast data")
         for year in years:
             savant_path = os.path.join(self._path, "BaseballSavant", str(year))
+            
+            # Skip if directory doesn't exist
+            if not os.path.exists(savant_path):
+                year_prog += 1
+                handler(year_prog / len(years), status=f"No data for {year}, skipping")
+                continue
+                
             progress_handler = ProgressHandler(savant_path)
             progress = progress_handler.get_progress()
             if progress != ProgressHandler.FINISHED:
@@ -44,17 +65,125 @@ class SImporter:
                     self.__undo_sql_import(year)
                 progress_handler.start_progress()
 
-                files = self.__year_files(year)
+                files = self.__get_valid_data_files(year)
+                if not files:
+                    # No valid files found
+                    handler(year_prog / len(years), status=f"No valid data files for {year}")
+                    continue
+                    
                 file_prog = 0
                 for csv in files:
-                    self.__import_dataframe(Utilities._import_csv(csv))
+                    try:
+                        # Check if file is empty or just a placeholder
+                        print(f"Importing {os.path.basename(csv)}")
+                        dataframe = self.__read_csv(csv)
+                        if dataframe is not None and not dataframe.empty:
+                            self.__import_dataframe(dataframe)
+                            print(f"  Imported {len(dataframe)} records")
+
+                    except Exception as e:
+                        print(f"Error processing {csv}: {str(e)}")
+                        
                     file_prog += 1
                     handler(((file_prog / len(files)) * (1 / len(years))) + (year_prog / len(years)),
-                            status="Importing Statcast data for %s" % year)
+                            status=f"Importing Statcast data for {year}")
 
                 progress_handler.end_progress()
             year_prog += 1
             handler(year_prog / len(years), status="Importing Statcast data")
+
+    def __get_valid_data_files(self, year):
+        """
+        Gets all valid Statcast data files for a given year with comprehensive validation.
+
+        :param year: the year to find valid data files for
+        :return: list of paths to valid CSV files
+        """
+        savant_path = os.path.join(self._path, "BaseballSavant", str(year))
+        if not os.path.exists(savant_path):
+            print(f"Directory for year {year} does not exist: {savant_path}")
+            return []
+
+        valid_files = []
+        all_files = [f for f in os.listdir(savant_path) if f.endswith('.csv') and not f.endswith('.error')]
+        
+        for filename in all_files:
+            file_path = os.path.join(savant_path, filename)
+            if os.path.getsize(file_path) < 10:
+                print(f"Skipping file due to small size: {filename}")
+                continue
+            
+            try:
+                with open(file_path, 'r') as f:
+                    # Read a few lines to check content
+                    data_lines = 0
+                    header_found = False
+                    
+                    for i, line in enumerate(f):
+                        if i >= 10:
+                            break
+                            
+                        line = line.strip()
+                        if line.startswith('#'):
+                            continue
+                        
+                        if not header_found:
+                            header_found = True
+                            continue
+                        
+                        if line and ',' in line:
+                            data_lines += 1
+                    
+                    if header_found and data_lines > 0:
+                        valid_files.append(file_path)
+                        print(f"Found valid data file: {filename}")
+                    else:
+                        print(f"Skipping file with no data: {filename}")
+                        
+            except Exception as e:
+                print(f"Error validating file {filename}: {str(e)}")
+                continue
+
+        print(f"Found {len(valid_files)} valid data files for year {year}")
+        return valid_files
+
+    def __read_csv(self, path, header=None):
+        """
+        Reads a csv file into memory, handling potential errors
+        
+        :param path: the path to the csv
+        :param header: the header for the file (as array of strings); if None (default), 
+                     the headers will come from the first line of the file
+        :return: a pandas DataFrame of the csv or None if empty/invalid
+        """
+        try:
+            if header:
+                return pd.read_csv(path, header=None, names=header)
+            else:
+                try:
+                    dataframe = pd.read_csv(path, low_memory=False)
+                    # Handle duplicate columns
+                    names_so_far = set()
+                    drop_cols = []
+                    for col in dataframe.columns:
+                        if col in names_so_far:
+                            drop_cols.append(col)
+                        else:
+                            names_so_far.add(col + ".1")
+                    
+                    if drop_cols:
+                        dataframe = dataframe.drop(columns=drop_cols)
+                        
+                    return dataframe
+                except pd.errors.EmptyDataError:
+                    print(f"  Warning: {os.path.basename(path)} is empty")
+                    return None
+                except Exception as e:
+                    print(f"  Error reading {os.path.basename(path)}: {str(e)}")
+                    return None
+        except Exception as e:
+            print(f"  Fatal error reading {os.path.basename(path)}: {str(e)}")
+            return None
 
     def unimport_statcast_data(self, year=None, handler=lambda *args: None):
         """
@@ -74,6 +203,11 @@ class SImporter:
         handler(0, status="Undoing Statcast import")
         for year in years:
             savant_path = os.path.join(self._path, "BaseballSavant", str(year))
+            if not os.path.exists(savant_path):
+                year_prog += 1
+                handler(year_prog / len(years), status=f"No data directory for {year}")
+                continue
+                
             progress_handler = ProgressHandler(savant_path)
             progress = progress_handler.get_progress()
             if progress != ProgressHandler.NONE:
@@ -89,51 +223,34 @@ class SImporter:
         :param dataframe: the dataframe to import
         :raises ConnectionError: if the connection fails
         """
-
-        def make_cell(cell, first):
-            t = type(cell)
-            if t is int or t is float:
-                if math.isnan(cell):
-                    return "NULL"
-                else:
-                    return str(cell)
-            elif t is str:
-                if cell == "null" or (first and len(cell) > 2):
-                    return "NULL"
-                else:
-                    return "\'" + cell.replace("\'", "\\\'") + "\'"
-            else:
-                raise TypeError("Unrecognized cell type: %s" % str(t))
-
-        def make_row(row):
-            first = True
-            for cell in row:
-                yield make_cell(cell, first)
-                first = False
-
-        def make_data(dataframe):
-            for row in dataframe.values:
-                yield make_row(row)
-
-        self._connection.import_data("pitch", dataframe.columns, make_data(dataframe), batch_size=500)
-
-    def __year_files(self, year):
-        """
-        Gets all the files in a year to be imported that haven't been to already
-
-        :param year: the year to be imported
-        :return: [(path to file, True iff file has been partially imported already)]
-        """
-
-        savant_path = os.path.join(self._path, "BaseballSavant", str(year))
-
-        files = []
-        file_list = Utilities._shell("find \"%s\" -name \"*.csv\"" % savant_path)[0].split("\n")
-        for csv in file_list:
-            if csv:
-                files.append(csv)
-
-        return files
+        clean_df = dataframe.copy()
+        # Handle NaN values, convert data types, and remove columns not in schema
+        if self._pitch_columns:
+            original_columns = set(clean_df.columns)
+            valid_columns = [col for col in clean_df.columns if col in self._pitch_columns]
+            filtered_columns = original_columns - set(valid_columns)
+            
+            if filtered_columns:
+                print(f"  Filtered out {len(filtered_columns)} column(s) not in schema:")
+                for col in sorted(filtered_columns):
+                    print(f"    - {col}")
+                
+                clean_df = clean_df[valid_columns]
+                print(f"  Continuing with {len(valid_columns)} valid column(s)")
+        
+        for column in clean_df.columns:
+            clean_df[column] = clean_df[column].apply(
+                lambda x: None if pd.isna(x) or (isinstance(x, str) and x.lower() == "null") else x
+            )
+        
+        clean_df.to_sql(
+            "pitch", 
+            self._connection._engine, 
+            if_exists='append',
+            index=False,
+            chunksize=500,
+            method='multi'
+        )
 
     def __undo_sql_import(self, year):
         """
@@ -142,7 +259,10 @@ class SImporter:
         :param year: the year to undo progress on
         :raises ConnectionError: if the connection fails
         """
+        print(f"Removing existing Statcast data for {year}...")
+        self._connection.execute(f"DELETE FROM pitch WHERE game_year={year};")
 
-        self._connection._run("DELETE FROM pitch WHERE game_year=%s;" % year)
-
-        os.remove(os.path.join(self._path, "BaseballSavant", "%s" % year, "progress.dat"))
+        # Remove progress file
+        progress_file = os.path.join(self._path, "BaseballSavant", str(year), "progress.dat")
+        if os.path.exists(progress_file):
+            os.remove(progress_file)
