@@ -4,7 +4,6 @@ from datetime import datetime
 import os
 import pandas as pd
 from .ProgressHandler import ProgressHandler
-from sqlalchemy import inspect
 
 class SImporter:
 
@@ -18,20 +17,6 @@ class SImporter:
 
         self._path = path
         self._connection = connection
-        self._pitch_columns = self._get_pitch_table_columns()
-
-    def _get_pitch_table_columns(self):
-        """
-        Get valid column names from the pitch table schema
-        
-        :return: Set of valid column names
-        """
-        try:
-            inspector = inspect(self._connection._engine)
-            return set(col['name'] for col in inspector.get_columns('pitch'))
-        except Exception as e:
-            print(f"Warning: Couldn't retrieve pitch table schema: {str(e)}")
-            return set()
 
     def import_statcast_data(self, year=None, handler=lambda *args: None):
         """
@@ -223,21 +208,16 @@ class SImporter:
         :param dataframe: the dataframe to import
         :raises ConnectionError: if the connection fails
         """
-        clean_df = dataframe.copy()
-        # Handle NaN values, convert data types, and remove columns not in schema
-        if self._pitch_columns:
-            original_columns = set(clean_df.columns)
-            valid_columns = [col for col in clean_df.columns if col in self._pitch_columns]
-            filtered_columns = original_columns - set(valid_columns)
+        # Remove columns not in schema
+        clean_df, filtered_columns = self._connection.filter_dataframe_columns(dataframe, 'pitch')
             
-            if filtered_columns:
-                print(f"  Filtered out {len(filtered_columns)} column(s) not in schema:")
-                for col in sorted(filtered_columns):
-                    print(f"    - {col}")
+        if filtered_columns:
+            print(f"  Filtered out {len(filtered_columns)} column(s) not in schema:")
+            for col in sorted(filtered_columns):
+                print(f"    - {col}")
                 
-                clean_df = clean_df[valid_columns]
-                print(f"  Continuing with {len(valid_columns)} valid column(s)")
-        
+            print(f"  Continuing with {len(clean_df.columns)} valid column(s)")
+            
         for column in clean_df.columns:
             clean_df[column] = clean_df[column].apply(
                 lambda x: None if pd.isna(x) or (isinstance(x, str) and x.lower() == "null") else x

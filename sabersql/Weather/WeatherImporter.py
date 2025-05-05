@@ -3,9 +3,10 @@
 import os
 import pandas as pd
 from ..OperationTracker import OperationTracker
-import pymysql
+import sqlalchemy
 from sqlalchemy import create_engine, text
-from .WeatherUtils import parse_filename_info, read_weather_csv
+from .WeatherUtils import parse_filename_info, read_weather_csv, clean_weather_dataframe
+
 class WeatherImporter:
     """
     Manages weather data imports to the database.
@@ -18,22 +19,10 @@ class WeatherImporter:
         """
         self._path = path
         self._connection = connection
-        self._engine = self._create_engine()
-    
-    def _create_engine(self):
-        """Create a SQLAlchemy engine from the connection parameters."""
-        user = self._connection._username
-        password = self._connection._password
-        database = self._connection._database
-        host = self._connection._address
-        port = self._connection._port or 3306
-        
-        connection_string = f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
-        return create_engine(connection_string)
 
     def _process_weather_file(self, file_path, filename):
         """Process a single weather file and import new records."""
-        stadium_info = parse_filename_info(filename)
+        file_info = parse_filename_info(filename)
         print(f"Reading weather data from {filename}...")
         
         # Read and clean data
@@ -41,8 +30,13 @@ class WeatherImporter:
         if not success or df.empty:
             return {'processed': False, 'error': error_message}
         
-        # Add stadium and team info
-        self._add_stadium_info(df, stadium_info)
+        # Extract venue_id from filename or file content
+        venue_id = self._extract_venue_id(df, file_info, file_path)
+        if venue_id is None:
+            print(f"  Error: Could not determine venue_id for file {filename}")
+            return {'processed': False, 'error': "No venue_id available"}
+        
+        df['venue_id'] = venue_id
         
         # Find new records to import
         new_records_df, file_stats = self._filter_existing_records(df)
@@ -54,18 +48,55 @@ class WeatherImporter:
         
         return file_stats
     
-    def _add_stadium_info(self, df, stadium_info):
-        """Add stadium and team information to the dataframe if available."""
-        if not stadium_info:
-            return
-            
-        if 'stadium' not in df.columns and stadium_info.get('stadium'):
-            df['stadium'] = stadium_info['stadium']
+    def _extract_venue_id(self, df, file_info, file_path):
+        """
+        Extract venue_id from various sources.
         
-        if 'team' not in df.columns and stadium_info.get('team'):
-            df['team'] = stadium_info['team']
+        1. Check file_info from filename
+        2. Check for venue_id comment in file
+        3. Use station/date to look up existing records
+        """
+        # Try to get from filename
+        if file_info and 'venue_id' in file_info and file_info['venue_id'] is not None:
+            return file_info['venue_id']
             
-
+        # Try to get from file comment
+        try:
+            with open(file_path, 'r') as file:
+                for line in file:
+                    if line.startswith('# venue_id:'):
+                        try:
+                            return int(line.split(':')[1].strip())
+                        except (ValueError, IndexError):
+                            pass
+                    if not line.startswith('#'):
+                        break
+        except Exception:
+            pass
+            
+        # If we have the station, try to look up existing records with the same station
+        if 'station' in df.columns and len(df) > 0:
+            station = df['station'].iloc[0]
+            
+            try:
+                query = f"""
+                SELECT DISTINCT venue_id 
+                FROM weather 
+                WHERE station = '{station}'
+                AND venue_id IS NOT NULL
+                LIMIT 1
+                """
+                
+                with self._engine.connect() as conn:
+                    result = conn.execute(text(query))
+                    row = result.fetchone()
+                    if row:
+                        return row[0]
+            except Exception as e:
+                print(f"  Warning: Error looking up venue_id: {str(e)}")
+                
+        return None
+            
     def _filter_existing_records(self, df):
         """
         Filter out records that already exist in the database.
@@ -82,12 +113,31 @@ class WeatherImporter:
         
         # Get database lookup data
         stations = df['station'].unique()
-        date_range = (df['valid'].min(), df['valid'].max())
+        if len(stations) == 0:
+            return None, stats
+            
+        date_range = None    
+        if 'valid' in df.columns:
+            valid_dates = df['valid'].dropna()
+            if not valid_dates.empty:
+                min_date = valid_dates.min()
+                max_date = valid_dates.max()
+                date_range = (min_date, max_date)
+        
+        if date_range is None:
+            print("  No valid date range found in file")
+            stats['skipped'] = len(df)
+            return None, stats
+            
         existing_keys = self._get_existing_record_keys(stations, *date_range)
         
         # Filter records
         new_records = []
         for _, row in df.iterrows():
+            if pd.isna(row.get('valid')):
+                stats['skipped'] += 1
+                continue
+                
             key = f"{row['station']}_{row['valid'].strftime('%Y-%m-%d %H:%M:%S')}"
             if key in existing_keys:
                 stats['skipped'] += 1
@@ -115,15 +165,35 @@ class WeatherImporter:
     def _import_records(self, df, filename):
         """Import records to database."""
         print(f"  Importing {len(df)} new weather records...")
-        df.to_sql(
-            'weather',
-            self._engine,
-            if_exists='append',
-            index=False,
-            chunksize=100,
-            method='multi'
-        )
-        print(f"  Successfully imported {len(df)} records")
+        
+        # Make sure we have only the columns that are in the weather table
+        try:
+            df_to_import, filtered_columns = self._connection.filter_dataframe_columns(df, 'pitch')
+            if filtered_columns:
+                print(f"  Filtered out {len(filtered_columns)} column(s) not in schema:")
+                for col in sorted(filtered_columns):
+                    print(f"    - {col}")
+            # Ensure required columns are present
+            required_cols = ['station', 'valid']
+            missing_cols = [col for col in required_cols if col not in df_to_import.columns]
+            if missing_cols:
+                raise ValueError(f"Missing required columns: {missing_cols}")
+            
+            if 'venue_id' not in df_to_import.columns:
+                raise ValueError("venue_id column is required for import")
+                
+            df_to_import.to_sql(
+                'weather',
+                self._engine,
+                if_exists='append',
+                index=False,
+                chunksize=100,
+                method='multi'
+            )
+            print(f"  Successfully imported {len(df_to_import)} records")
+            
+        except Exception as e:
+            print(f"  Error importing data: {str(e)}")
 
     def _update_stats(self, overall_stats, file_stats):
         """Update overall statistics with file statistics."""
@@ -137,21 +207,30 @@ class WeatherImporter:
         if file_stats.get('imported', False):
             overall_stats['imported_files'] += 1
 
-    def import_weather_data(self, matches_df=None, handler=lambda *args: None):
+    def import_weather_data(self, matches_df=None, handler=lambda *args: None, force=False):
         """
         Imports weather data to MySQL database, skipping already existing records.
+        
+        :param matches_df: DataFrame with venue-to-station matches (optional)
+        :param handler: Progress reporting function
+        :param force: If True, import even if operation was previously completed
         """
         weather_dir = os.path.join(self._path, "Weather")
         
         tracker = OperationTracker(weather_dir)
         
+        if tracker.is_operation_complete('import') and not force:
+            print("Weather data import already marked as complete.")
+            handler(1, status="Weather data already imported")
+            return True
+        
         if not self._prepare_import(weather_dir, tracker, handler):
-            return
+            return False
         
         csv_files = [f for f in os.listdir(weather_dir) if f.endswith('.csv')]
         if not csv_files:
             self._handle_no_files(tracker, handler)
-            return
+            return False
         
         stats = {
             'total_records': 0,
@@ -176,6 +255,7 @@ class WeatherImporter:
                 tracker.record_error('import', e, file=csv_file)
         
         self._finalize_import(tracker, stats, handler)
+        return stats['imported_files'] > 0 or stats['skipped_records'] > 0
     
     def _prepare_import(self, weather_dir, tracker, handler):
         """Setup and validate import prerequisites."""
@@ -270,20 +350,14 @@ class WeatherImporter:
         :raises ConnectionError: if the connection fails
         """
         try:
-            with self._engine.connect() as conn:
-                conn.execute(text("DELETE FROM weather"))
+            self._connection._run("DELETE FROM weather;")
             print("Deleted all weather data from database")
         except Exception as e:
             print(f"Error deleting weather data: {str(e)}")
-            # Fall back to the original connection method if the engine approach fails
-            try:
-                self._connection._run("DELETE FROM weather;")
-                print("Deleted all weather data using fallback method")
-            except Exception as e2:
-                print(f"Error with fallback deletion method: {str(e2)}")
-        
+            raise
+
         # Reset the operation tracker
-        progress_file_path = os.path.join(self._path, "Weather", "operations.json")
-        if os.path.exists(progress_file_path):
-            tracker = OperationTracker(os.path.join(self._path, "Weather"))
+        weather_dir = os.path.join(self._path, "Weather")
+        if os.path.exists(weather_dir):
+            tracker = OperationTracker(weather_dir)
             tracker.reset_operation('import')

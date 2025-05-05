@@ -3,6 +3,7 @@
 from sqlalchemy import create_engine, text
 import pandas as pd
 from .Schemas import schemas
+from sqlalchemy import inspect
 
 class SQLAlchemyConnector:
     """
@@ -63,7 +64,48 @@ class SQLAlchemyConnector:
             return create_engine(conn_string)
         except Exception as e:
             raise ConnectionError(f"Failed to create SQLAlchemy engine for {self._database} at {self._username}@{self._address} : {str(e)}")
+
+    def get_table_columns(self, table_name):
+        """
+        Get the columns for a specific table in the database
+        
+        :param table_name: Name of the table to get columns for
+        :return: Set of column names in the table
+        """
+        try:
+            with self._engine.connect() as conn:
+                insp = inspect(self._engine)
+                return set(col['name'] for col in insp.get_columns(table_name))
+        except Exception as e:
+            print(f"Warning: Could not get columns for table {table_name}: {str(e)}")
+            # Fall back to direct SQL query
+            try:
+                with self._engine.connect() as conn:
+                    result = conn.execute(text(f"DESCRIBE {table_name};"))
+                    columns = set(row[0] for row in result)
+                    return columns
+            except Exception as e2:
+                print(f"Error getting table schema: {str(e2)}")
+                return None
+    
+    def filter_dataframe_columns(self, df, table_name):
+        """
+        Filter a DataFrame to only include columns that exist in the target table
+        
+        :param df: Pandas DataFrame to filter
+        :param table_name: Table to check columns against
+        :return: Tuple of (filtered_dataframe, set_of_removed_columns)
+        """
+        valid_columns = self.get_table_columns(table_name)
+        if not valid_columns:
+            return df, set()
             
+        original_columns = set(df.columns)
+        valid_df_columns = [col for col in df.columns if col in valid_columns]
+        filtered_columns = original_columns - set(valid_df_columns)
+        
+        return df[valid_df_columns], filtered_columns
+     
     def read_sql(self, query, params=None):
         """
         Execute a SQL query and return the results as a pandas DataFrame
