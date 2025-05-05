@@ -18,6 +18,9 @@ setuptools.setup(
     packages=setuptools.find_packages(),
     install_requires=[
         'pandas',
+        'sqlalchemy',
+        'pymysql',
+        'statsapi',
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
