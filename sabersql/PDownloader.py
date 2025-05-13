@@ -19,8 +19,8 @@ class PDownloader(BaseDownloader):
         :param path: the path to the folder for all SaberSQL data
         """
         super().__init__(path)
-        self._repo_base_url = "https://github.com/chadwickbureau/register"
-        self._raw_data_url = "https://github.com/chadwickbureau/register/raw/master/data"
+        self._github_api_url = "https://api.github.com/repos/chadwickbureau/register/contents/data"
+        self._raw_data_url = "https://raw.githubusercontent.com/chadwickbureau/register/master/data"
 
     def download(self, handler=lambda *args: None):
         """
@@ -36,13 +36,13 @@ class PDownloader(BaseDownloader):
         files_to_download = self._get_people_csv_files()
         
         if not files_to_download:
-            print("No people-*.csv files found in the repository. Falling back to people.csv")
+            print("No people files found in repository. Defaulting to people.csv")
             files_to_download = ["people.csv"]
         
         total_files = len(files_to_download)
         downloaded_files = 0
         
-        print(f"Found {total_files} files to download")
+        print(f"Found {total_files} files to download: {', '.join(files_to_download)}")
         
         handler(0, status="Downloading people data")
         
@@ -90,28 +90,51 @@ class PDownloader(BaseDownloader):
     
     def _get_people_csv_files(self):
         """
-        Discover all people-*.csv files in the repository
+        Discover all people*.csv files in the repository using GitHub API
         
-        :return: List of filenames matching the people-*.csv pattern
+        :return: List of filenames matching the people*.csv pattern
         """
         try:
-            def fetch_repo_listing():
-                response = requests.get(f"{self._repo_base_url}/tree/master/data")
+            def fetch_repo_contents():
+                headers = {
+                    'Accept': 'application/vnd.github.v3+json',
+                    'User-Agent': 'SaberSQL-Downloader'
+                }
+                response = requests.get(
+                    self._github_api_url,
+                    headers=headers,
+                    timeout=30
+                )
                 response.raise_for_status()
-                return response.text
+                return response.json()
             
-            html_content = self._retry_operation(
-                fetch_repo_listing,
+            # Fetch repository contents using GitHub API
+            contents = self._retry_operation(
+                fetch_repo_contents,
                 max_retries=3,
-                error_handler=lambda e, a, m: print(f"Retry {a}/{m} for repository listing: {str(e)[:50]}")
+                error_handler=lambda e, a, m: print(f"API request attempt {a}/{m} failed: {str(e)[:100]}")
             )
             
-            # Look for all people-*.csv files in the HTML response
-            pattern = r'href="[^"]+/blob/master/data/(people-[^"]+\.csv)"'
-            matches = re.findall(pattern, html_content)
+            # Filter files to include only CSV files starting with 'people'
+            csv_files = []
             
-            return list(set(matches))
+            if isinstance(contents, list):
+                for item in contents:
+                    if (item.get('type') == 'file' and 
+                        item.get('name', '').endswith('.csv') and 
+                        item.get('name', '').startswith('people')):
+                        csv_files.append(item['name'])
+            
+            if not csv_files:
+                # If API request returned valid response but no matching files
+                print("No people*.csv files found in repository contents.")
+                return ["people.csv"]  # Default to single file
+            
+            print(f"GitHub API: Found {len(csv_files)} people*.csv files")
+            return csv_files
                 
         except Exception as e:
-            print(f"Error discovering people CSV files: {str(e)}")
-            return []
+            print(f"Error querying GitHub API: {str(e)}")
+            # Fallback method: try one final attempt with a direct request for people.csv
+            print("Falling back to default file: people.csv")
+            return ["people.csv"]
