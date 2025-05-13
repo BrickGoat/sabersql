@@ -87,11 +87,9 @@ class WeatherImporter:
                 LIMIT 1
                 """
                 
-                with self._engine.connect() as conn:
-                    result = conn.execute(text(query))
-                    row = result.fetchone()
-                    if row:
-                        return row[0]
+                result = self._connection.read_sql(query)
+                if not result.empty:
+                    return result.iloc[0]['venue_id']
             except Exception as e:
                 print(f"  Warning: Error looking up venue_id: {str(e)}")
                 
@@ -162,13 +160,14 @@ class WeatherImporter:
         return {f"{row['station']}_{row['valid'].strftime('%Y-%m-%d %H:%M:%S')}" 
                 for row in existing_data}
 
+
     def _import_records(self, df, filename):
         """Import records to database."""
         print(f"  Importing {len(df)} new weather records...")
         
         # Make sure we have only the columns that are in the weather table
         try:
-            df_to_import, filtered_columns = self._connection.filter_dataframe_columns(df, 'pitch')
+            df_to_import, filtered_columns = self._connection.filter_dataframe_columns(df, 'weather')
             if filtered_columns:
                 print(f"  Filtered out {len(filtered_columns)} column(s) not in schema:")
                 for col in sorted(filtered_columns):
@@ -184,17 +183,17 @@ class WeatherImporter:
                 
             df_to_import.to_sql(
                 'weather',
-                self._engine,
+                self._connection._engine,
                 if_exists='append',
                 index=False,
-                chunksize=100,
-                method='multi'
+                method='multi',
+                chunksize=100
             )
             print(f"  Successfully imported {len(df_to_import)} records")
             
         except Exception as e:
             print(f"  Error importing data: {str(e)}")
-
+            
     def _update_stats(self, overall_stats, file_stats):
         """Update overall statistics with file statistics."""
         if not file_stats.get('processed', False):
@@ -323,15 +322,13 @@ class WeatherImporter:
                   AND valid BETWEEN '{min_date_str}' AND '{max_date_str}'
             """
             
-            with self._engine.connect() as conn:
-                result = conn.execute(text(query))
-                existing_records = [{'station': row[0], 'valid': row[1]} for row in result]
-                
-            return existing_records
+            result = self._connection.read_sql(query)
+            return [{'station': row['station'], 'valid': row['valid']} for _, row in result.iterrows()]
+            
         except Exception as e:
             print(f"Error checking existing records: {str(e)}")
             return []
-    
+        
     def unimport_weather_data(self, handler=lambda *args: None):
         """
         Undoes import of weather data from MySQL database.
@@ -350,7 +347,7 @@ class WeatherImporter:
         :raises ConnectionError: if the connection fails
         """
         try:
-            self._connection._run("DELETE FROM weather;")
+            self._connection.execute("DELETE FROM weather;")
             print("Deleted all weather data from database")
         except Exception as e:
             print(f"Error deleting weather data: {str(e)}")

@@ -24,7 +24,7 @@ def get_venues_from_database(connection):
         WHERE location_latitude IS NOT NULL AND location_longitude IS NOT NULL
         """
         
-        venues_df = pd.read_sql(query, connection)
+        venues_df = connection.read_sql(query)
         
         required_columns = ['venue_id', 'name', 'lat', 'lon']
         for col in required_columns:
@@ -61,7 +61,6 @@ def match_venues_to_weather_stations(stations_csv_path, connection,
     
     stations = pd.read_csv(stations_csv_path)
     stations = stations.dropna(subset=['ICAO'])
-    
     begin_col = next((col for col in stations.columns if col.lower() == 'begin'), None)
     end_col = next((col for col in stations.columns if col.lower() == 'end'), None)
     

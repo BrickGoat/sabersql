@@ -10,7 +10,7 @@ class SQLAlchemyConnector:
     Provides a SQLAlchemy connection to the database for efficient operations.
     """
 
-    def __init__(self, username, password, database, address):
+    def __init__(self, username, password, database, address, port=None):
         """
         Initialize a SQLAlchemy connection with the given information
 
@@ -24,7 +24,7 @@ class SQLAlchemyConnector:
         self._password = password
         self._database = database
         self._address = address
-        
+        self._port = port
         self._engine = self._create_engine()
 
     def create_database(self):
