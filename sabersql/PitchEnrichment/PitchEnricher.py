@@ -7,7 +7,7 @@ import time
 import pandas as pd
 from datetime import datetime
 from ..Utilities import _shell
-from ..ManifestTracker import OperationTracker
+from ..OperationTracker import OperationTracker
 
 class PitchEnricher:
     """

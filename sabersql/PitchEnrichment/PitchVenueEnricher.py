@@ -2,15 +2,16 @@
 
 from .PitchEnricher import PitchEnricher
 import time
-
+import pandas as pd
 class PitchVenueEnricher(PitchEnricher):
     """
     Enriches pitch data with venue information from the MLB Stats API.
+    Now uses a normalized approach with a game_venue mapping table.
     """
 
     def __init__(self, path, connection):
         """Initialize the venue enricher."""
-        super().__init__(path, connection, "venue_id")
+        super().__init__(path, connection, "game_pk")  # We don't need a specific column name now
 
     def _get_operation_name(self):
         """Get the operation name for tracking."""
@@ -21,39 +22,38 @@ class PitchVenueEnricher(PitchEnricher):
         return "venue"
     
     def _ensure_database_structure(self):
-        """Ensure venue table and column exist."""
+        """Ensure venue table and game_venue mapping table exist."""
         try:
+            # Ensure venue table exists
             query = "SHOW TABLES LIKE 'venue';"
-            df = self._connection.read_sql(query)
+            df = self._sqlalchemy.read_sql(query)
             
             if df.empty:
                 from ..Schemas import _venue
-                self._connection.execute(_venue)
+                self._sqlalchemy.execute(_venue)
                 print("Created venue table")
             
-            query = "SHOW COLUMNS FROM pitch LIKE 'venue_id';"
-            df = self._connection.read_sql(query)
+            # Create game_venue mapping table if it doesn't exist
+            query = "SHOW TABLES LIKE 'game_venue';"
+            df = self._sqlalchemy.read_sql(query)
             
             if df.empty:
                 query = """
-                ALTER TABLE pitch ADD COLUMN venue_id INT COMMENT 'ID of the venue where the pitch was thrown';
+                CREATE TABLE game_venue (
+                  game_pk INT PRIMARY KEY,
+                  venue_id INT,
+                  FOREIGN KEY (venue_id) REFERENCES venue(venue_id)
+                ) COMMENT 'Mapping table between games and venues';
                 """
-                self._connection.execute(query)
-                print("Added venue_id column to pitch table")
-                
-                query = """
-                ALTER TABLE pitch ADD CONSTRAINT fk_pitch_venue
-                FOREIGN KEY (venue_id) REFERENCES venue(venue_id);
-                """
-                self._connection.execute(query)
-                print("Added foreign key constraint to pitch.venue_id")
+                self._sqlalchemy.execute(query)
+                print("Created game_venue mapping table")
             
         except Exception as e:
-            print(f"Error ensuring venue tables exist: {e}")
+            print(f"Error ensuring database structure: {e}")
     
     def _get_appropriate_batch_size(self, max_batch_size):
         """Get appropriate batch size for venue enrichment."""
-        return min(max_batch_size, 50)  # Venue updates are lightweight
+        return min(max_batch_size, 200)  # Can use larger batches now with simplified approach
     
     def _collect_batch_data(self, batch, tracker):
         """Collect venue data for a batch of games."""
@@ -75,71 +75,69 @@ class PitchVenueEnricher(PitchEnricher):
         return batch_venue_data
     
     def _update_batch_data(self, batch_data):
-        """Update the database with venue information."""
+        """Update the game_venue table with venue information."""
         try:
             if not batch_data:
                 return 0
-                
-            game_pks = ", ".join(str(pk) for pk in batch_data.keys())
             
-            # Get count before update
-            before_query = f"""
-                SELECT COUNT(*) as before_count
-                FROM pitch
-                WHERE game_pk IN ({game_pks}) AND venue_id IS NULL;
+            # First check which mappings already exist
+            game_pks = list(batch_data.keys())
+            # Convert list of game_pks to a comma-separated string for direct inclusion in query
+            game_pks_str = ", ".join(str(pk) for pk in game_pks)
+            
+            query = f"""
+                SELECT game_pk 
+                FROM game_venue 
+                WHERE game_pk IN ({game_pks_str})
             """
-            before_df = self._connection.read_sql(before_query)
-            before_count = int(before_df.iloc[0]['before_count']) if not before_df.empty else 0
             
-            if before_count == 0:
+            existing_df = self._sqlalchemy.read_sql(query)
+            existing_games = set(existing_df['game_pk'].tolist() if not existing_df.empty else [])
+            
+            # Filter out games that already have venue mappings
+            new_mappings = {
+                game_pk: venue_id 
+                for game_pk, venue_id in batch_data.items() 
+                if game_pk not in existing_games
+            }
+            
+            if not new_mappings:
                 return 0
-                
-            # Create temporary table
-            self._connection.execute("""
-                CREATE TEMPORARY TABLE IF NOT EXISTS temp_venue_updates (
+            
+            # Create temporary table for efficient insert
+            self._sqlalchemy.execute("""
+                CREATE TEMPORARY TABLE IF NOT EXISTS temp_game_venue (
                     game_pk INT,
                     venue_id INT
                 );
             """)
             
             # Clear any existing data
-            self._connection.execute("TRUNCATE TABLE temp_venue_updates;")
+            self._sqlalchemy.execute("TRUNCATE TABLE temp_game_venue;")
             
             # Insert all our game_pk/venue_id pairs
-            values = ", ".join([f"({game_pk}, {venue_id})" for game_pk, venue_id in batch_data.items()])
-            self._connection.execute(f"""
-                INSERT INTO temp_venue_updates (game_pk, venue_id)
+            values = ", ".join([f"({game_pk}, {venue_id})" for game_pk, venue_id in new_mappings.items()])
+            self._sqlalchemy.execute(f"""
+                INSERT INTO temp_game_venue (game_pk, venue_id)
                 VALUES {values};
             """)
             
-            # Execute a single batch update via JOIN
-            self._connection.execute("""
-                UPDATE pitch p
-                JOIN temp_venue_updates t ON p.game_pk = t.game_pk
-                SET p.venue_id = t.venue_id
-                WHERE p.venue_id IS NULL;
+            # Insert into game_venue table, ignoring duplicates
+            self._sqlalchemy.execute("""
+                INSERT IGNORE INTO game_venue (game_pk, venue_id)
+                SELECT game_pk, venue_id FROM temp_game_venue;
             """)
             
-            # Count how many remain without venue_id
-            after_query = f"""
-                SELECT COUNT(*) as after_count
-                FROM pitch
-                WHERE game_pk IN ({game_pks}) AND venue_id IS NULL;
-            """
-            after_df = self._connection.read_sql(after_query)
-            after_count = int(after_df.iloc[0]['after_count']) if not after_df.empty else 0
-            
             # Clean up
-            self._connection.execute("DROP TEMPORARY TABLE IF EXISTS temp_venue_updates;")
+            self._sqlalchemy.execute("DROP TEMPORARY TABLE IF EXISTS temp_game_venue;")
             
-            # Calculate actual updated count
-            updated_count = before_count - after_count
-            return updated_count
+            # Return count of new mappings added
+            return len(new_mappings)
                     
         except Exception as e:
-            print(f"Error batch updating pitch venues: {e}")
+            print(f"Error batch updating game venues: {e}")
             try:
-                self._connection.execute("DROP TEMPORARY TABLE IF EXISTS temp_venue_updates;")
+                self._sqlalchemy.execute("DROP TEMPORARY TABLE IF EXISTS temp_game_venue;")
             except:
                 pass
             return 0
@@ -227,7 +225,7 @@ class PitchVenueEnricher(PitchEnricher):
                         values.append(str(value))
             
             query = f"INSERT INTO venue ({', '.join(columns)}) VALUES ({', '.join(values)});"
-            self._connection.execute(query)
+            self._sqlalchemy.execute(query)
             
             print(f"Inserted venue ID {venue_info['venue_id']} ({venue_info.get('name')}) into venue table")
             
@@ -253,7 +251,7 @@ class PitchVenueEnricher(PitchEnricher):
             
             if updates:
                 query = f"UPDATE venue SET {', '.join(updates)} WHERE venue_id = {venue_id};"
-                self._connection.execute(query)
+                self._sqlalchemy.execute(query)
                 
                 print(f"Updated venue ID {venue_id} ({venue_info.get('name')}) in venue table")
             
@@ -272,7 +270,7 @@ class PitchVenueEnricher(PitchEnricher):
         venue_id = venue_info['venue_id']
         
         query = f"SELECT venue_id FROM venue WHERE venue_id = {venue_id};"
-        df = self._connection.read_sql(query)
+        df = self._sqlalchemy.read_sql(query)
         
         if df.empty:
             self._insert_venue(venue_info)
@@ -296,7 +294,7 @@ class PitchVenueEnricher(PitchEnricher):
         # Check which venues already exist in the database
         venue_list = ", ".join(str(venue_id) for venue_id in venue_ids)
         query = f"SELECT venue_id FROM venue WHERE venue_id IN ({venue_list});"
-        df = self._connection.read_sql(query)
+        df = self._sqlalchemy.read_sql(query)
         
         existing_venues = set(df['venue_id'].tolist()) if not df.empty else set()
         
@@ -318,3 +316,76 @@ class PitchVenueEnricher(PitchEnricher):
                     if venue_info and 'venue_id' in venue_info:
                         self._insert_venue(venue_info)
                     break
+    
+    def _get_games_needing_enrichment(self, start_date=None, end_date=None):
+        """
+        Get all games that don't have venue mappings, filtered by date range if provided
+        
+        :param start_date: Optional start date in YYYY-MM-DD format
+        :param end_date: Optional end date in YYYY-MM-DD format
+        :return: List of tuples (game_pk, game_date)
+        """
+        query = """
+            SELECT DISTINCT p.game_pk, p.game_date 
+            FROM pitch p
+            LEFT JOIN game_venue gv ON p.game_pk = gv.game_pk
+            WHERE gv.game_pk IS NULL 
+        """
+        
+        # Add date range filter if provided
+        if start_date:
+            query += f" AND p.game_date >= '{start_date}'"
+        if end_date:
+            query += f" AND p.game_date <= '{end_date}'"
+            
+        query += " ORDER BY p.game_date;"
+        
+        df = self._sqlalchemy.read_sql(query)
+        
+        if df.empty:
+            return []
+        
+        return list(zip(df['game_pk'].tolist(), df['game_date'].tolist()))
+  
+    def _get_date_range_info(self, start_date=None, end_date=None):
+        """
+        Get information about the date range and count of games in the database
+        
+        :param start_date: Optional start date in YYYY-MM-DD format
+        :param end_date: Optional end date in YYYY-MM-DD format
+        :return: Dictionary with date range information
+        """
+        query = """
+            SELECT 
+                MIN(p.game_date) as min_date,
+                MAX(p.game_date) as max_date,
+                COUNT(DISTINCT p.game_pk) as total_count,
+                SUM(CASE WHEN gv.game_pk IS NULL THEN 1 ELSE 0 END) as missing_count
+            FROM (
+                SELECT DISTINCT game_pk, game_date 
+                FROM pitch
+            ) p
+            LEFT JOIN game_venue gv ON p.game_pk = gv.game_pk
+        """
+        
+        # Add date range filter if provided
+        where_clauses = []
+        if start_date:
+            where_clauses.append(f"p.game_date >= '{start_date}'")
+        if end_date:
+            where_clauses.append(f"p.game_date <= '{end_date}'")
+            
+        if where_clauses:
+            query += f" WHERE {' AND '.join(where_clauses)}"
+        
+        df = self._sqlalchemy.read_sql(query)
+        
+        if df.empty:
+            return None
+            
+        return {
+            'min_date': df.iloc[0]['min_date'].strftime('%Y-%m-%d') if not pd.isna(df.iloc[0]['min_date']) else None,
+            'max_date': df.iloc[0]['max_date'].strftime('%Y-%m-%d') if not pd.isna(df.iloc[0]['max_date']) else None,
+            'total_count': int(df.iloc[0]['total_count']) if not pd.isna(df.iloc[0]['total_count']) else 0,
+            'missing_count': int(df.iloc[0]['missing_count']) if not pd.isna(df.iloc[0]['missing_count']) else 0
+        }
